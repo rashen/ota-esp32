@@ -45,12 +45,12 @@ fn main() -> Result<()> {
         }
 
         if !sent_binary {
-            let total = binary.len() / OTA_DATA_SIZE;
+            let total = binary.chunks(OTA_DATA_SIZE).count() - 1;
             'send: for (i, data) in binary.chunks(OTA_DATA_SIZE).enumerate() {
                 const RETRY_CNT: u32 = 5;
 
                 'retry: for j in 0..RETRY_CNT {
-                    if let Err(e) = postcard::to_slice(
+                    match postcard::to_slice(
                         &Packet::OtaPacket(OtaPacket {
                             num: i as u32,
                             total: total as u32,
@@ -58,12 +58,15 @@ fn main() -> Result<()> {
                         }),
                         &mut buffer,
                     ) {
-                        println!("Failed to serialize bin data: {e:?}");
+                        Ok(msg) => {
+                            if let Err(e) = socket.send_to(msg, addr.clone()) {
+                                println!("Failed sending bin: {e:?}");
+                            }
+                        }
+                        Err(e) => {
+                            println!("Failed to serialize bin data: {e:?}");
+                        }
                     };
-
-                    if let Err(e) = socket.send_to(&buffer, addr.clone()) {
-                        println!("Failed sending bin: {e:?}");
-                    }
 
                     let timeout = 500;
                     let max_loops = timeout / READ_TIMEOUT_MS;
