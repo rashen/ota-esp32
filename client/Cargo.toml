@@ -1,0 +1,85 @@
+[package]
+name = "client"
+version = "0.0.1"
+edition = "2024"
+authors = ["Rasmus Henriksson <rasmus@henriksson.nu>"]
+
+[[bin]]
+name = "client"
+harness = false # do not use the built in cargo test harness -> resolve rust-analyzer errors
+
+[dependencies]
+cfg-if = "1"
+embassy-executor = { version = "0.10.0" }
+embassy-net = { version = "0.6.0", features = [
+    "dhcpv4",
+    "dhcpv4-hostname",
+    "medium-ethernet",
+    "tcp",
+    "udp",
+] }
+embedded-storage = "0.3.1"
+embassy-sync = "0.7.2"
+embassy-time = { version = "0.5.0", features = ["generic-queue-8"] }
+esp-backtrace = { git = "https://github.com/rashen/esp-hal", branch = "esp-hal-1.1.x", features = [
+    "panic-handler",
+    "println",
+] }
+esp-alloc = { git = "https://github.com/rashen/esp-hal", branch = "esp-hal-1.1.x" }
+esp-bootloader-esp-idf = { git = "https://github.com/rashen/esp-hal", branch = "esp-hal-1.1.x" }
+esp-hal = { git = "https://github.com/rashen/esp-hal", branch = "esp-hal-1.1.x", features = [
+    "log-04",
+    "unstable",
+] }
+esp-println = { git = "https://github.com/rashen/esp-hal", branch = "esp-hal-1.1.x", features = [
+    "colors",
+    "log-04",
+    "critical-section",
+] }
+esp-radio = { git = "https://github.com/rashen/esp-hal", branch = "esp-hal-1.1.x", features = [
+    "esp-alloc",
+    "unstable",
+    "wifi",
+    "wifi-eap",
+] }
+esp-rtos = { git = "https://github.com/rashen/esp-hal", branch = "esp-hal-1.1.x", features = [
+    "embassy",
+    "esp-alloc",
+    "esp-radio",
+] }
+esp-storage = { git = "https://github.com/rashen/esp-hal", branch = "esp-hal-1.1.x" }
+heapless = { version = "0.8.0", default-features = false, features = ["serde"] }
+postcard = "1"
+serde = { version = "1", default-features = false, features = ["derive"] }
+shared = { path = "../shared/" }
+static_cell = { version = "2.1.0", features = [] }
+dotenvy_macro = "0.15.7"
+
+[features]
+default = ["esp32c3"]
+esp32c3 = [
+    "esp-backtrace/esp32c3",
+    "esp-bootloader-esp-idf/esp32c3",
+    "esp-hal/esp32c3",
+    "esp-storage/esp32c3",
+    "esp-rtos/esp32c3",
+    "esp-radio/esp32c3",
+]
+esp32c5 = [
+    "esp-backtrace/esp32c5",
+    "esp-bootloader-esp-idf/esp32c5",
+    "esp-hal/esp32c5",
+    "esp-storage/esp32c5",
+    "esp-rtos/esp32c5",
+    "esp-radio/esp32c5",
+]
+
+[profile.dev]
+opt-level = 's'
+
+[profile.release]
+debug = true
+debug-assertions = true
+lto = "fat"
+codegen-units = 1
+opt-level = 's'

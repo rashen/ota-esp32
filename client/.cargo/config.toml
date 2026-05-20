@@ -1,0 +1,19 @@
+[target.riscv32imc-unknown-none-elf]
+runner = "espflash flash --monitor --chip esp32c3 --partition-table=partitions.csv"
+
+[target.riscv32imac-unknown-none-elf]
+runner = "espflash flash --monitor --chip esp32c5 --partition-table=partitions.csv"
+
+[env]
+ESP_LOG = "info"
+
+[build]
+rustflags = ["-C", "link-arg=-Tlinkall.x", "-C", "force-frame-pointers"]
+target = "riscv32imc-unknown-none-elf"
+
+[alias]
+build-c3 = "build --target riscv32imc-unknown-none-elf --features=esp32c3 --no-default-features"
+run-c3 = "run --target riscv32imc-unknown-none-elf --features=esp32c3 --no-default-features"
+
+build-c5 = "build --target riscv32imac-unknown-none-elf --features=esp32c5 --no-default-features"
+run-c5 = "run --target riscv32imac-unknown-none-elf --features=esp32c5 --no-default-features"
