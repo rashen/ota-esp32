@@ -1,36 +1,3 @@
-//! OTA Update Example
-//!
-//! This shows the basics of dealing with partitions and changing the active
-//! partition. For simplicity it will flash an application image embedded into
-//! the binary. In a real world application you can get the image via HTTP(S),
-//! UART or from an sd-card etc.
-//!
-//! Adjust the target and the chip in the following commands according to the
-//! chip used!
-//!
-//! ```ignore,bash
-//! cargo xtask build examples gpio --chip=esp32
-//! espflash save-image --chip=esp32 target/xtensa-esp32-none-elf/release/gpio_interrupt examples/target/ota_image
-//! cargo xtask build examples update --chip=esp32
-//! espflash save-image --chip=esp32 target/xtensa-esp32-none-elf/release/ota_update examples/target/ota_image
-//! cargo xtask build examples update --chip=esp32
-//! espflash save-image --chip=esp32 target/xtensa-esp32-none-elf/release/ota_update examples/target/ota_image
-//! espflash erase-flash
-//! cargo xtask run example update --chip=esp32
-//! ```
-//!
-//! On first boot notice the firmware partition gets booted ("Loaded app from
-//! partition at offset 0x10000"). Press the BOOT button, once finished press
-//! the RESET button.
-//!
-//! Notice OTA0 gets booted ("Loaded app from partition at offset 0x110000").
-//!
-//! Once again press BOOT, when finished press RESET.
-//! You will see the `gpio_interrupt` example gets booted from OTA1 ("Loaded app
-//! from partition at offset 0x210000")
-//!
-//! See <https://docs.espressif.com/projects/esp-idf/en/latest/esp32/api-reference/system/ota.html>
-
 #![no_std]
 #![no_main]
 
@@ -45,17 +12,16 @@ use embassy_time::{Duration, Timer};
 use embedded_storage::Storage;
 use esp_alloc as _;
 use esp_backtrace as _;
-use esp_hal::gpio::{Input, InputConfig, Pull};
+// use esp_hal::gpio::{Input, InputConfig, Pull};
 use esp_println::println;
 use esp_radio::wifi::sta::StationConfig;
 use esp_radio::wifi::{Interface, WifiController};
 use esp_storage::FlashStorage;
 use heapless::{String, Vec};
-use shared::{OTA_DATA_SIZE, OtaPacket, Packet};
+use shared::{Ack, OtaPacket, Packet};
 
 esp_bootloader_esp_idf::esp_app_desc!();
 
-// static OTA_IMAGE: &[u8] = include_bytes!("../../../target/ota_image");
 macro_rules! mk_static {
     ($t:ty,$val:expr) => {{
         static STATIC_CELL: static_cell::StaticCell<$t> = static_cell::StaticCell::new();
@@ -122,13 +88,13 @@ async fn main(spawner: Spawner) -> ! {
         }
     }
 
-    cfg_if::cfg_if! {
-         if #[cfg(feature = "esp32c5")] {
-            let button = peripherals.GPIO28;
-        } else {
-            let button = peripherals.GPIO9;
-        }
-    }
+    // cfg_if::cfg_if! {
+    //      if #[cfg(feature = "esp32c5")] {
+    //         let button = peripherals.GPIO28;
+    //     } else {
+    //         let button = peripherals.GPIO9;
+    //     }
+    // }
 
     let config = esp_radio::wifi::ControllerConfig::default();
     #[allow(unused_mut)]
@@ -139,38 +105,36 @@ async fn main(spawner: Spawner) -> ! {
     spawner
         .spawn(wifi_task(spawner, interfaces.station, controller).expect("Failed spawning WIFI"));
 
-    let boot_button = Input::new(button, InputConfig::default().with_pull(Pull::Up));
+    // let boot_button = Input::new(button, InputConfig::default().with_pull(Pull::Up));
 
-    let mut done = false;
-    loop {
-        let _ = OTA_READY.wait().await;
-        println!("OTA update ready");
-        println!("Press boot button to flash and switch to the next OTA slot");
-        // Lock OtaBuffer so it can't be written to by the wifi task
-        let ota_buffer = OTA_BUFFER.lock().await;
+    let _ = OTA_READY.wait().await;
+    println!("OTA update ready");
+    println!("Press boot button to flash and switch to the next OTA slot");
 
-        if boot_button.is_low() && !done {
-            done = true;
+    let (mut next_app_partition, part_type) = ota.next_partition().unwrap();
 
-            let (mut next_app_partition, part_type) = ota.next_partition().unwrap();
+    println!("Flashing image to {:?}", part_type);
 
-            println!("Flashing image to {:?}", part_type);
+    // write to the app partition
+    let ota_buffer = OTA_BUFFER.lock().await;
+    for (sector, chunk) in ota_buffer.chunks(4096).enumerate() {
+        println!("Writing sector {sector}...");
 
-            // write to the app partition
-            for (sector, chunk) in ota_buffer.chunks(4096).enumerate() {
-                println!("Writing sector {sector}...");
-
-                next_app_partition
-                    .write((sector * 4096) as u32, chunk)
-                    .unwrap();
-            }
-
-            println!("Changing OTA slot and setting the state to NEW");
-
-            ota.activate_next_partition().unwrap();
-            ota.set_current_ota_state(esp_bootloader_esp_idf::ota::OtaImageState::New)
-                .unwrap();
+        if let Err(e) = next_app_partition.write((sector * 4096) as u32, chunk) {
+            println!("Failed to write to next app partition: {e:?}");
         }
+    }
+
+    println!("Changing OTA slot and setting the state to NEW");
+    if let Err(e) = ota.activate_next_partition() {
+        println!("Failed to activate next partition: {e}");
+    }
+    if let Err(e) = ota.set_current_ota_state(esp_bootloader_esp_idf::ota::OtaImageState::New) {
+        println!("Failed to set current ota state: {e}");
+    }
+
+    loop {
+        Timer::after_millis(100).await
     }
 }
 
@@ -211,17 +175,17 @@ async fn wifi_task(
 
     let mut recv_bytes = [0u8; 600];
     let mut rx_meta = [embassy_net::udp::PacketMetadata::EMPTY; 10];
-    let mut tx_meta = [embassy_net::udp::PacketMetadata::EMPTY; 0];
+    let mut tx_meta = [embassy_net::udp::PacketMetadata::EMPTY; 10];
     let mut rx_buffer = [0; 4096];
-    let mut tx_buffer = [0; 0];
-    let mut s = embassy_net::udp::UdpSocket::new(
+    let mut tx_buffer = [0; 128];
+    let mut socket = embassy_net::udp::UdpSocket::new(
         *stack,
         &mut rx_meta,
         &mut rx_buffer,
         &mut tx_meta,
         &mut tx_buffer,
     );
-    s.bind(4242).expect("BIND");
+    socket.bind(4242).expect("BIND");
 
     let mut failed_attempts = 0;
     let mut ota_cnt = 0;
@@ -253,11 +217,11 @@ async fn wifi_task(
             }
         }
 
-        let recv_fut = s.recv_from(&mut recv_bytes);
+        let recv_fut = socket.recv_from(&mut recv_bytes);
         let timeout = embassy_time::with_timeout(Duration::from_millis(500), recv_fut).await;
         if let Ok(r) = timeout {
             match r {
-                Ok(_) => match postcard::from_bytes::<Packet>(&recv_bytes) {
+                Ok((_len, metadata)) => match postcard::from_bytes::<Packet>(&recv_bytes) {
                     Ok(pkt) => match pkt {
                         Packet::Message(msg) => {
                             println!("Received message {msg}")
@@ -277,7 +241,23 @@ async fn wifi_task(
                                 for b in data {
                                     let _ = buffer.push(b);
                                 }
-                                println!("Received {num}/{total}");
+
+                                if num % 100 == 0 {
+                                    println!("Received {num}/{total}");
+                                }
+
+                                let from = metadata.endpoint;
+                                let response = postcard::to_vec::<_, 2>(&Ack { num })
+                                    .expect("Failed to serialize ack");
+
+                                let send_fut = socket.send_to(&response, from);
+                                if let Err(e) =
+                                    embassy_time::with_timeout(Duration::from_millis(100), send_fut)
+                                        .await
+                                {
+                                    println!("Failed to send ack: {e:?}");
+                                }
+
                                 // let start = OTA_DATA_SIZE * num as usize;
                                 // unsafe {
                                 //     let src = data.as_ptr();

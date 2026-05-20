@@ -1,6 +1,6 @@
 use anyhow::{Result, anyhow};
 use clap::Parser;
-use shared::{OTA_DATA_SIZE, OtaPacket, Packet};
+use shared::{Ack, OTA_DATA_SIZE, OtaPacket, Packet};
 use std::net::UdpSocket;
 use std::path::Path;
 use std::thread::sleep;
@@ -18,6 +18,8 @@ struct Args {
     binary: String,
 }
 
+const READ_TIMEOUT_MS: u64 = 10;
+
 fn main() -> Result<()> {
     let args = Args::parse();
 
@@ -29,6 +31,7 @@ fn main() -> Result<()> {
 
     let ip = args.ip;
     let socket = UdpSocket::bind("0.0.0.0:0")?;
+    let _ = socket.set_read_timeout(Some(Duration::from_millis(READ_TIMEOUT_MS)));
     let addr = format!("{ip}:4242");
 
     let mut sent_binary = false;
@@ -41,30 +44,51 @@ fn main() -> Result<()> {
             println!("Failed sending msg: {e:?}");
         }
 
-        sleep(Duration::from_millis(500));
-
         if !sent_binary {
             let total = binary.len() / OTA_DATA_SIZE;
-            for (i, data) in binary.chunks(OTA_DATA_SIZE).enumerate() {
-                if let Err(e) = postcard::to_slice(
-                    &Packet::OtaPacket(OtaPacket {
-                        num: i as u32,
-                        total: total as u32,
-                        data: data.try_into().unwrap(),
-                    }),
-                    &mut buffer,
-                ) {
-                    println!("Failed to serialize bin data: {e:?}");
-                };
+            'send: for (i, data) in binary.chunks(OTA_DATA_SIZE).enumerate() {
+                const RETRY_CNT: u32 = 5;
 
-                if let Err(e) = socket.send_to(&buffer, addr.clone()) {
-                    println!("Failed sending bin: {e:?}");
+                'retry: for j in 0..RETRY_CNT {
+                    if let Err(e) = postcard::to_slice(
+                        &Packet::OtaPacket(OtaPacket {
+                            num: i as u32,
+                            total: total as u32,
+                            data: data.try_into().unwrap(),
+                        }),
+                        &mut buffer,
+                    ) {
+                        println!("Failed to serialize bin data: {e:?}");
+                    };
+
+                    if let Err(e) = socket.send_to(&buffer, addr.clone()) {
+                        println!("Failed sending bin: {e:?}");
+                    }
+
+                    let timeout = 500;
+                    let max_loops = timeout / READ_TIMEOUT_MS;
+                    let mut recv_buffer = [0_u8; 4];
+                    for _ in 0..max_loops {
+                        if let Ok((size, _)) = socket.recv_from(&mut recv_buffer) {
+                            let ack: Ack = postcard::from_bytes(&recv_buffer[0..size]).unwrap();
+                            if ack.num == i as u32 {
+                                break 'retry;
+                            } else {
+                                println!("Ack failed");
+                                if j == RETRY_CNT {
+                                    println!("Aborting");
+                                    break 'send;
+                                }
+                            }
+                        }
+                    }
                 }
-                sleep(Duration::from_millis(10));
             }
             println!("Binary sent");
             sent_binary = true;
         }
+
+        sleep(Duration::from_millis(1000));
     }
 
     #[allow(unreachable_code)]
