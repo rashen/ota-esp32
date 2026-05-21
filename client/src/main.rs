@@ -6,19 +6,17 @@ use dotenvy_macro::dotenv;
 use embassy_executor::Spawner;
 use embassy_net::{Stack, StackResources};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
-use embassy_sync::mutex::Mutex;
-use embassy_sync::signal::Signal;
+use embassy_sync::channel::Channel;
 use embassy_time::{Duration, Timer};
 use embedded_storage::Storage;
 use esp_alloc as _;
 use esp_backtrace as _;
-// use esp_hal::gpio::{Input, InputConfig, Pull};
 use esp_println::println;
 use esp_radio::wifi::sta::StationConfig;
 use esp_radio::wifi::{Interface, WifiController};
 use esp_storage::FlashStorage;
 use heapless::{String, Vec};
-use shared::{Ack, OtaPacket, Packet};
+use shared::{Ack, OTA_DATA_SIZE, OtaPacket, Packet};
 
 esp_bootloader_esp_idf::esp_app_desc!();
 
@@ -31,13 +29,12 @@ macro_rules! mk_static {
     }};
 }
 
-type OtaBuffer = Mutex<
-    CriticalSectionRawMutex,
-    Vec<u8, { esp_bootloader_esp_idf::partitions::PARTITION_TABLE_MAX_LEN }>,
->;
+static OTA_CHANNEL: Channel<CriticalSectionRawMutex, OtaChannelPacket, 1> = Channel::new();
 
-static OTA_READY: Signal<CriticalSectionRawMutex, ()> = Signal::new();
-static OTA_BUFFER: OtaBuffer = Mutex::new(Vec::new());
+struct OtaChannelPacket {
+    data: Vec<u8, 4096>,
+    is_last: bool,
+}
 
 #[esp_rtos::main]
 async fn main(spawner: Spawner) -> ! {
@@ -45,6 +42,10 @@ async fn main(spawner: Spawner) -> ! {
     let peripherals = esp_hal::init(esp_hal::Config::default());
 
     esp_alloc::heap_allocator!(size: 96 * 1024);
+
+    // println!("STARTED FROM OTA!!");
+    // println!("STARTED FROM OTA!!");
+    // println!("STARTED FROM OTA!!");
 
     println!("Starting rtos");
     let software_interrupt =
@@ -69,32 +70,19 @@ async fn main(spawner: Spawner) -> ! {
         esp_bootloader_esp_idf::ota_updater::OtaUpdater::new(&mut flash, &mut buffer).unwrap();
 
     let current = ota.selected_partition().unwrap();
-    println!(
-        "current image state {:?} (only relevant if the bootloader was built with auto-rollback support)",
-        ota.current_ota_state()
-    );
+    println!("current image state {:?}", ota.current_ota_state());
     println!("currently selected partition {:?}", current);
 
     // Mark the current slot as VALID - this is only needed if the bootloader was
     // built with auto-rollback support. The default pre-compiled bootloader in
     // espflash is NOT.
     if let Ok(state) = ota.current_ota_state() {
-        if state == esp_bootloader_esp_idf::ota::OtaImageState::New
-            || state == esp_bootloader_esp_idf::ota::OtaImageState::PendingVerify
-        {
+        if state == esp_bootloader_esp_idf::ota::OtaImageState::PendingVerify {
             println!("Changed state to VALID");
             ota.set_current_ota_state(esp_bootloader_esp_idf::ota::OtaImageState::Valid)
                 .unwrap();
         }
     }
-
-    // cfg_if::cfg_if! {
-    //      if #[cfg(feature = "esp32c5")] {
-    //         let button = peripherals.GPIO28;
-    //     } else {
-    //         let button = peripherals.GPIO9;
-    //     }
-    // }
 
     let config = esp_radio::wifi::ControllerConfig::default();
     #[allow(unused_mut)]
@@ -105,23 +93,20 @@ async fn main(spawner: Spawner) -> ! {
     spawner
         .spawn(wifi_task(spawner, interfaces.station, controller).expect("Failed spawning WIFI"));
 
-    // let boot_button = Input::new(button, InputConfig::default().with_pull(Pull::Up));
-
-    let _ = OTA_READY.wait().await;
-    println!("OTA update ready");
-    println!("Press boot button to flash and switch to the next OTA slot");
-
     let (mut next_app_partition, part_type) = ota.next_partition().unwrap();
 
-    println!("Flashing image to {:?}", part_type);
+    println!("Flashing OTA image to {:?}", part_type);
 
-    // write to the app partition
-    let ota_buffer = OTA_BUFFER.lock().await;
-    for (sector, chunk) in ota_buffer.chunks(4096).enumerate() {
-        println!("Writing sector {sector}...");
-
-        if let Err(e) = next_app_partition.write((sector * 4096) as u32, chunk) {
+    let mut written = 0;
+    loop {
+        let pkt = OTA_CHANNEL.receive().await;
+        if let Err(e) = next_app_partition.write(written as u32, &pkt.data) {
             println!("Failed to write to next app partition: {e:?}");
+        }
+        written += pkt.data.len();
+
+        if pkt.is_last {
+            break;
         }
     }
 
@@ -132,6 +117,7 @@ async fn main(spawner: Spawner) -> ! {
     if let Err(e) = ota.set_current_ota_state(esp_bootloader_esp_idf::ota::OtaImageState::New) {
         println!("Failed to set current ota state: {e}");
     }
+    println!("OTA update succeded. Ready to reboot.");
 
     loop {
         Timer::after_millis(100).await
@@ -190,6 +176,8 @@ async fn wifi_task(
     let mut failed_attempts = 0;
     let mut ota_cnt = 0;
     let mut ip = None;
+    let ota_channel = OTA_CHANNEL.sender();
+    let mut ota_buffer = Vec::<u8, 4096>::new();
     loop {
         if !controller.is_connected() {
             ip = None;
@@ -236,45 +224,45 @@ async fn wifi_task(
                             }
                             ota_cnt += 1;
 
-                            if let Ok(mut buffer) = OTA_BUFFER.try_lock() {
-                                // TODO: This is very inefficient
-                                for b in data {
-                                    let _ = buffer.push(b);
-                                }
+                            unsafe {
+                                core::ptr::copy_nonoverlapping(
+                                    data.as_ptr(),
+                                    ota_buffer.as_mut_ptr().offset(ota_buffer.len() as isize),
+                                    data.len(),
+                                );
+                                ota_buffer.set_len(ota_buffer.len() + data.len());
+                            }
 
-                                if num % 100 == 0 {
-                                    println!("Received {num}/{total}");
-                                }
+                            let free_space = ota_buffer.capacity() - ota_buffer.len();
+                            if free_space < OTA_DATA_SIZE || num == total {
+                                let mut to_send = Vec::<u8, 4096>::new();
+                                core::mem::swap(&mut ota_buffer, &mut to_send);
+                                ota_channel
+                                    .send(OtaChannelPacket {
+                                        data: to_send,
+                                        is_last: num == total,
+                                    })
+                                    .await;
+                            }
 
-                                let from = metadata.endpoint;
-                                let response = postcard::to_vec::<_, 2>(&Ack { num })
-                                    .expect("Failed to serialize ack");
+                            if num % 100 == 0 {
+                                println!("Received {num}/{total}");
+                            }
 
-                                let send_fut = socket.send_to(&response, from);
-                                if let Err(e) =
-                                    embassy_time::with_timeout(Duration::from_millis(100), send_fut)
-                                        .await
-                                {
-                                    println!("Failed to send ack: {e:?}");
-                                }
+                            let from = metadata.endpoint;
+                            let response = postcard::to_vec::<_, 2>(&Ack { num })
+                                .expect("Failed to serialize ack");
 
-                                // let start = OTA_DATA_SIZE * num as usize;
-                                // unsafe {
-                                //     let src = data.as_ptr();
-                                //     let dst = core::ptr::addr_of_mut!(buffer[start]);
-                                //     core::ptr::copy_nonoverlapping(src, dst, OTA_DATA_SIZE);
-                                // }
-                                if num == total {
-                                    OTA_READY.signal(());
-                                }
-                            } else {
-                                println!("Failed to lock buffer");
+                            let send_fut = socket.send_to(&response, from);
+                            if let Err(e) =
+                                embassy_time::with_timeout(Duration::from_millis(100), send_fut)
+                                    .await
+                            {
+                                println!("Failed to send ack: {e:?}");
                             }
                         }
                     },
-                    Err(e) => {
-                        println!("Postcard decode error: {e:?}");
-                    }
+                    Err(_) => {}
                 },
                 Err(e) => {
                     println!("UDP receive error: {e:?}");

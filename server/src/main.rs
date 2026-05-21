@@ -45,6 +45,7 @@ fn main() -> Result<()> {
         }
 
         if !sent_binary {
+            let start_time = std::time::Instant::now();
             let total = binary.chunks(OTA_DATA_SIZE).count() - 1;
             'send: for (i, data) in binary.chunks(OTA_DATA_SIZE).enumerate() {
                 const RETRY_CNT: u32 = 5;
@@ -87,7 +88,8 @@ fn main() -> Result<()> {
                     }
                 }
             }
-            println!("Binary sent");
+            let t = start_time.elapsed().as_secs();
+            println!("Binary sent in {t}s");
             sent_binary = true;
         }
 

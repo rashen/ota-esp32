@@ -1,8 +1,8 @@
 [target.riscv32imc-unknown-none-elf]
-runner = "espflash flash --monitor --chip esp32c3 --partition-table=partitions.csv"
+runner = "espflash flash --monitor --chip esp32c3 --partition-table=partitions.csv --bootloader bootloader-c3.bin --erase-parts=ota_0,ota_1"
 
 [target.riscv32imac-unknown-none-elf]
-runner = "espflash flash --monitor --chip esp32c5 --partition-table=partitions.csv"
+runner = "espflash flash --monitor --chip esp32c5 --partition-table=partitions.csv --bootloader bootloader-c5.bin --erase-parts=ota_0,ota_1"
 
 [env]
 ESP_LOG = "info"

@@ -114,6 +114,7 @@ dependencies = [
  "cfg-if",
  "dotenvy_macro",
  "embassy-executor",
+ "embassy-futures",
  "embassy-net",
  "embassy-sync 0.7.2",
  "embassy-time 0.5.1",

@@ -54,6 +54,7 @@ serde = { version = "1", default-features = false, features = ["derive"] }
 shared = { path = "../shared/" }
 static_cell = { version = "2.1.0", features = [] }
 dotenvy_macro = "0.15.7"
+embassy-futures = "0.1.2"
 
 [features]
 default = ["esp32c3"]
